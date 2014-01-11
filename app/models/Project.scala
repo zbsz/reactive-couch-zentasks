@@ -1,195 +1,102 @@
 package models
 
-import play.api.db._
-import play.api.Play.current
-
-import anorm._
-import anorm.SqlParser._
-
 import scala.language.postfixOps
+import play.api.libs.json.{JsObject, Json}
+import scala.concurrent.Future
+import com.geteit.rcouch.views.Query
+import java.util.UUID
+import scala.concurrent.ExecutionContext.Implicits.global
 
-case class Project(id: Pk[Long], folder: String, name: String)
+case class Project(id: String, folder: String, name: String, members: List[User] = Nil)
 
 object Project {
-  
-  // -- Parsers
-  
-  /**
-   * Parse a Project from a ResultSet
-   */
-  val simple = {
-    get[Pk[Long]]("project.id") ~
-    get[String]("project.folder") ~
-    get[String]("project.name") map {
-      case id~folder~name => Project(id, folder, name)
-    }
-  }
-  
-  // -- Queries
-    
+
+  implicit val reads = Json.reads[Project]
+  implicit val writes = Json.writes[Project].transform(v => v.asInstanceOf[JsObject] ++ Json.obj("docType" -> "Project"))
+
+
   /**
    * Retrieve a Project from id.
    */
-  def findById(id: Long): Option[Project] = {
-    DB.withConnection { implicit connection =>
-      SQL("select * from project where id = {id}").on(
-        "id" -> id
-      ).as(Project.simple.singleOpt)
-    }
-  }
-  
+  def findById(id: String): Future[Option[Project]] = Couch.bucket.flatMap(_.get[Project](id))
+
   /**
    * Retrieve project for user
    */
-  def findInvolving(user: String): Seq[Project] = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          select * from project 
-          join project_member on project.id = project_member.project_id 
-          where project_member.user_email = {email}
-        """
-      ).on(
-        "email" -> user
-      ).as(Project.simple *)
-    }
-  }
-  
+  def findInvolving(email: String): Future[List[Project]] = for {
+    b <- Couch.bucket
+    v <- Couch.Projects.byMember
+    projects <- b.list[Project](v, Query(Some(email)))
+  } yield projects.flatten
+
   /**
    * Update a project.
    */
-  def rename(id: Long, newName: String) {
-    DB.withConnection { implicit connection =>
-      SQL("update project set name = {name} where id = {id}").on(
-        "id" -> id, "name" -> newName
-      ).executeUpdate()
-    }
-  }
-  
+  def rename(id: String, newName: String) = Couch.bucket.flatMap(_.update[Project](id, (p: Project) => Some(p.copy(name = newName))))
+
   /**
    * Delete a project.
    */
-  def delete(id: Long) {
-    DB.withConnection { implicit connection => 
-      SQL("delete from project where id = {id}").on(
-        "id" -> id
-      ).executeUpdate()
-    }
-  }
-  
+  def delete(id: String) = Couch.bucket.flatMap(_.delete(id))
+
   /**
    * Delete all project in a folder
    */
-  def deleteInFolder(folder: String) {
-    DB.withConnection { implicit connection => 
-      SQL("delete from project where folder = {folder}").on(
-        "folder" -> folder
-      ).executeUpdate()
-    }
-  }
+  def deleteInFolder(folder: String) = for {
+    b <- Couch.bucket
+    v <- Couch.Projects.byFolder
+    projects <- b.list[Project](v, Query(Some(folder)))
+    _ <- Future.sequence(projects.flatten.map(p => b.delete(p.id)))
+  } yield ()
   
   /**
    * Rename a folder
    */
-  def renameFolder(folder: String, newName: String) {
-    DB.withConnection { implicit connection =>
-      SQL("update project set folder = {newName} where folder = {name}").on(
-        "name" -> folder, "newName" -> newName
-      ).executeUpdate()
-    }
-  }
-  
+  def renameFolder(folder: String, newName: String) = for {
+    b <- Couch.bucket
+    v <- Couch.Projects.byFolder
+    projects <- b.list[Project](v, Query(Some(folder)))
+    _ <- Future.sequence(projects.flatten.map(p => b.update[Project](p.id, (p: Project) => Some(p.copy(folder = newName)))))
+  } yield ()
+
   /**
    * Retrieve project member
    */
-  def membersOf(project: Long): Seq[User] = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          select user.* from user 
-          join project_member on project_member.user_email = user.email 
-          where project_member.project_id = {project}
-        """
-      ).on(
-        "project" -> project
-      ).as(User.simple *)
-    }
+  def membersOf(project: String): Future[List[User]] = findById(project).map {
+    case Some(p) => p.members
+    case None => Nil
   }
-  
+
   /**
    * Add a member to the project team.
    */
-  def addMember(project: Long, user: String) {
-    DB.withConnection { implicit connection =>
-      SQL("insert into project_member values({project}, {user})").on(
-        "project" -> project,
-        "user" -> user
-      ).executeUpdate()
+  def addMember(project: String, user: String) = for {
+    b <- Couch.bucket
+    u <- User.findByEmail(user)
+    res <- u.fold(Future.successful(None: Option[Project])) { us =>
+      b.update[Project](project, (p: Project) => Some(p.copy(members = us :: p.members)))
     }
-  }
-  
+  } yield res
+
   /**
    * Remove a member from the project team.
    */
-  def removeMember(project: Long, user: String) {
-    DB.withConnection { implicit connection =>
-      SQL("delete from project_member where project_id = {project} and user_email = {user}").on(
-        "project" -> project,
-        "user" -> user
-      ).executeUpdate()
-    }
-  }
-  
+  def removeMember(project: String, user: String): Future[Option[Project]] =
+    Couch.bucket.flatMap(_.update[Project](project, (p: Project) => Some(p.copy(members = p.members.filter(_.email != user)))))
+
   /**
    * Check if a user is a member of this project
    */
-  def isMember(project: Long, user: String): Boolean = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          select count(user.email) = 1 from user 
-          join project_member on project_member.user_email = user.email 
-          where project_member.project_id = {project} and user.email = {email}
-        """
-      ).on(
-        "project" -> project,
-        "email" -> user
-      ).as(scalar[Boolean].single)
-    }
-  }
-   
+  def isMember(project: String, user: String): Future[Boolean] =
+    Couch.bucket.flatMap(_.get[Project](project)).map(_.exists(_.members.exists(_.email == user)))
+
   /**
    * Create a Project.
    */
-  def create(project: Project, members: Seq[String]): Project = {
-     DB.withTransaction { implicit connection =>
-       
-       // Get the project id
-       val id: Long = project.id.getOrElse {
-         SQL("select next value for project_seq").as(scalar[Long].single)
-       }
-       
-       // Insert the project
-       SQL(
-         """
-           insert into project values (
-             {id}, {name}, {folder}
-           )
-         """
-       ).on(
-         "id" -> id,
-         "name" -> project.name,
-         "folder" -> project.folder
-       ).executeUpdate()
-       
-       // Add members
-       members.foreach { email =>
-         SQL("insert into project_member values ({id}, {email})").on("id" -> id, "email" -> email).executeUpdate()
-       }
-       
-       project.copy(id = Id(id))
-       
-     }
-  }
-  
+  def create(project: Project, members: Seq[String]): Future[Project] = for {
+    b <- Couch.bucket
+    users <- Future.sequence(members.map(User.findByEmail))
+    p = project.copy(id = UUID.randomUUID().toString, members = users.toList.flatten)
+    _ <- b.add[Project](p.id, p)
+  } yield p
 }

@@ -1,89 +1,46 @@
 package models
 
-import play.api.db._
-import play.api.Play.current
-
-import anorm._
-import anorm.SqlParser._
-
-import scala.language.postfixOps
+import play.api.libs.json.{JsObject, Json}
+import scala.concurrent.Future
+import com.geteit.rcouch.views.Query
+import scala.concurrent.ExecutionContext.Implicits.global
 
 case class User(email: String, name: String, password: String)
 
 object User {
   
   // -- Parsers
-  
-  /**
-   * Parse a User from a ResultSet
-   */
-  val simple = {
-    get[String]("user.email") ~
-    get[String]("user.name") ~
-    get[String]("user.password") map {
-      case email~name~password => User(email, name, password)
-    }
-  }
-  
+  implicit val reads = Json.reads[User]
+  implicit val writes = Json.writes[User].transform(v => v.asInstanceOf[JsObject] ++ Json.obj("docType" -> "User"))
+
+  def userId(email: String) = "user_" + email
+
   // -- Queries
   
   /**
    * Retrieve a User from email.
    */
-  def findByEmail(email: String): Option[User] = {
-    DB.withConnection { implicit connection =>
-      SQL("select * from user where email = {email}").on(
-        "email" -> email
-      ).as(User.simple.singleOpt)
-    }
-  }
-  
+  def findByEmail(email: String): Future[Option[User]] = Couch.bucket.flatMap(_.get[User](userId(email)))
+
   /**
    * Retrieve all users.
    */
-  def findAll: Seq[User] = {
-    DB.withConnection { implicit connection =>
-      SQL("select * from user").as(User.simple *)
-    }
-  }
-  
+  def findAll: Future[List[User]] = for {
+    b <- Couch.bucket
+    v <- Couch.Users.all
+    users <- b.list[User](v, Query())
+  } yield users.flatten
+
   /**
    * Authenticate a User.
    */
-  def authenticate(email: String, password: String): Option[User] = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-         select * from user where 
-         email = {email} and password = {password}
-        """
-      ).on(
-        "email" -> email,
-        "password" -> password
-      ).as(User.simple.singleOpt)
-    }
-  }
-   
+  def authenticate(email: String, password: String): Future[Option[User]] = for {
+    b <- Couch.bucket
+    u <- b.get[User](userId(email))
+  } yield u.filter(_.password == password)
+
   /**
    * Create a User.
    */
-  def create(user: User): User = {
-    DB.withConnection { implicit connection =>
-      SQL(
-        """
-          insert into user values (
-            {email}, {name}, {password}
-          )
-        """
-      ).on(
-        "email" -> user.email,
-        "name" -> user.name,
-        "password" -> user.password
-      ).executeUpdate()
-      
-      user
-      
-    }
-  }
-  
+  def create(user: User): Future[Boolean] = Couch.bucket.flatMap(_.add[User](userId(user.email), user))
 }

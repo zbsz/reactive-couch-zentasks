@@ -7,6 +7,8 @@ import play.api.data.Forms._
 
 import models._
 import views._
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
 
 object Application extends Controller {
 
@@ -16,9 +18,7 @@ object Application extends Controller {
     tuple(
       "email" -> text,
       "password" -> text
-    ) verifying ("Invalid email or password", result => result match {
-      case (email, password) => User.authenticate(email, password).isDefined
-    })
+    )
   )
 
   /**
@@ -31,10 +31,14 @@ object Application extends Controller {
   /**
    * Handle login form submission.
    */
-  def authenticate = Action { implicit request =>
-    loginForm.bindFromRequest.fold(
-      formWithErrors => BadRequest(html.login(formWithErrors)),
-      user => Redirect(routes.Projects.index).withSession("email" -> user._1)
+  def authenticate = Action.async { implicit request =>
+    val form = loginForm.bindFromRequest
+    form.fold(
+      formWithErrors => Future.successful(BadRequest(html.login(formWithErrors))),
+      user => User.authenticate(user._1, user._2) map {
+        case Some(u) => Redirect(routes.Projects.index).withSession("email" -> user._1)
+        case _ => BadRequest(html.login(form.withGlobalError("Invalid email or password")))
+      }
     )
   }
 
@@ -84,31 +88,28 @@ trait Secured {
   /** 
    * Action for authenticated users.
    */
-  def IsAuthenticated(f: => String => Request[AnyContent] => Result) = Security.Authenticated(username, onUnauthorized) { user =>
-    Action(request => f(user)(request))
+  def IsAuthenticated(f: => String => Request[AnyContent] => Future[SimpleResult]) = Security.Authenticated(username, onUnauthorized) { user =>
+    Action.async(request => f(user)(request))
   }
 
   /**
    * Check if the connected user is a member of this project.
    */
-  def IsMemberOf(project: Long)(f: => String => Request[AnyContent] => Result) = IsAuthenticated { user => request =>
-    if(Project.isMember(project, user)) {
-      f(user)(request)
-    } else {
-      Results.Forbidden
+  def IsMemberOf(project: String)(f: => String => Request[AnyContent] => Future[SimpleResult]) = IsAuthenticated { user => request =>
+    Project.isMember(project, user) flatMap {
+      case true => f(user)(request)
+      case _ => Future.successful(Results.Forbidden)
     }
   }
 
   /**
    * Check if the connected user is a owner of this task.
    */
-  def IsOwnerOf(task: Long)(f: => String => Request[AnyContent] => Result) = IsAuthenticated { user => request =>
-    if(Task.isOwner(task, user)) {
-      f(user)(request)
-    } else {
-      Results.Forbidden
+  def IsOwnerOf(task: String)(f: => String => Request[AnyContent] => Future[SimpleResult]) = IsAuthenticated { user => request =>
+    Task.isOwner(task, user) flatMap {
+      case true => f(user)(request)
+      case false => Future.successful(Results.Forbidden)
     }
   }
-
 }
 

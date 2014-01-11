@@ -28,8 +28,8 @@ class IntegrationSpec extends Specification {
         browser.pageSource must contain("Logout")
         
         val items = browser.$("li")
-        items.size must equalTo(15)
         items.get(3).getText must contain("Website Delete")
+        items.size must equalTo(15)
       }
     }
     

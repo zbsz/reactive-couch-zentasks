@@ -319,8 +319,7 @@ class TaskFolder extends Backbone.View
       data:
         title: $("input[name=taskBody]", form).val()
         dueDate: $("input[name=dueDate]", form).val()
-        assignedTo:
-          email: $("input[name=assignedTo]", form).val()
+        assignedTo: $("input[name=assignedTo]", form).val()
       success: (tpl) ->
         newTask = new TaskItem(el: $(tpl), folder: @)
         @$el.find("ul").append(newTask.el)
